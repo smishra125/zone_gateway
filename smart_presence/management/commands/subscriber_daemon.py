@@ -8,63 +8,52 @@ MQTT_BROKER = "127.0.0.1"
 MQTT_PORT = 1883
 MQTT_TOPIC = "esp32s3/beacons"
 
-def parse_ibeacon_signature(hex_str):
-    """
-    Parses raw advertising hexadecimal payloads to match Apple's 
-    iBeacon signature block (Company ID: 4c00 + Indicator: 0215).
-    """
-    try:
-        if len(hex_str) >= 58 and "4c000215" in hex_str:
-            # Locate position offsets of the header signature block
-            idx = hex_str.index("4c000215")
-            
-            # Slice and structure the 16-Byte UUID string
-            u_start = idx + 8
-            u_str = hex_str[u_start : u_start + 32]
-            uuid = f"{u_str[0:8]}-{u_str[8:12]}-{u_str[12:16]}-{u_str[16:20]}-{u_str[20:32]}".upper()
-            
-            # Slice Big-Endian Major and Minor values
-            major = int(hex_str[u_start + 32 : u_start + 36], 16)
-            minor = int(hex_str[u_start + 36 : u_start + 40], 16)
-            
-            return True, uuid, major, minor
-    except Exception:
-        pass
-    return False, None, None, None
-
 def on_connect(client, userdata, flags, rc):
     print(f"Connected to Mosquitto Broker at [{MQTT_BROKER}:{MQTT_PORT}]")
     client.subscribe(MQTT_TOPIC)
-    print(f"Listening for incoming ESP32-S3 beacon data stream on '{MQTT_TOPIC}'...")
+    print(f"Listening for incoming ESP32-S3 pre-parsed beacon data stream on '{MQTT_TOPIC}'...")
 
 def on_message(client, userdata, msg):
     try:
-        # Step A: Parse string input to JSON object
         payload = json.loads(msg.payload.decode('utf-8'))
+        
         mac_addr = payload.get('mac')
         rssi_val = payload.get('rssi')
+        pkt_type = payload.get('type', 'Standard')
+        
+        is_ibeacon = (pkt_type == "iBeacon")
+        uuid = payload.get('uuid')
+        major = payload.get('major')
+        minor = payload.get('minor')
+        esp_timestamp = payload.get('timestamp') 
+        
+        # 🔥 EXTRACT THE NEW BOOLEAN FLAG HERE
+        beacon_flag = payload.get('flag', False) 
+
         raw_hex = payload.get('data', '')
 
-        # Step B: Identify and parse embedded packet telemetry profiles
-        is_ibeacon, uuid, major, minor = parse_ibeacon_signature(raw_hex)
-
-        # Step C: Save data entries securely using Django ORM
+        # Save to database including the new flag field
         log_entry = BeaconLog.objects.create(
             mac=mac_addr,
             rssi=rssi_val,
             raw_data=raw_hex,
             is_ibeacon=is_ibeacon,
-            uuid=uuid,
+            uuid=uuid.upper() if uuid else None,
             major=major,
-            minor=minor
+            minor=minor,
+            device_timestamp=esp_timestamp,
+            flag=beacon_flag  # <-- Map it to your database column here!
         )
 
-        # Output readable status reports to terminal console
+        # Output to terminal console showing the new flag status
         print(f"[{log_entry.timestamp.strftime('%Y-%m-%d %H:%M:%S')}] Saved Beacon Entry:")
+        print(f"  🔹 ESP Hardware Time: {esp_timestamp}")
         print(f"  🔹 MAC Address   : {mac_addr}")
         print(f"  🔹 RSSI Signal   : {rssi_val} dBm")
+        print(f"  🔹 Type          : {pkt_type}")
+        print(f"  🔹 Status Flag   : {beacon_flag}") # <-- Visually check it in console
         if is_ibeacon:
-            print(f"  🔹 UUID Location : {uuid}")
+            print(f"  🔹 UUID Location : {uuid.upper() if uuid else 'N/A'}")
             print(f"  🔹 Major Zone ID : {major} | Minor Room ID: {minor}")
         print("-" * 60)
 
@@ -72,7 +61,7 @@ def on_message(client, userdata, msg):
         print(f"Inbound processing breakdown encountered: {e}")
 
 class Command(BaseCommand):
-    help = 'Starts the long-running daemon task absorbing raw MQTT stream packets into Django DB.'
+    help = 'Starts the long-running daemon task absorbing pre-parsed MQTT stream packets into Django DB.'
 
     def handle(self, *args, **options):
         client = mqtt.Client()
@@ -80,5 +69,4 @@ class Command(BaseCommand):
         client.on_message = on_message
 
         client.connect(MQTT_BROKER, MQTT_PORT, 60)
-        # Block and preserve execution context indefinitely
         client.loop_forever()
