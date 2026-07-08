@@ -11,11 +11,14 @@ MQTT_TOPIC = "esp32s3/beacons"
 def on_connect(client, userdata, flags, rc):
     print(f"Connected to Mosquitto Broker at [{MQTT_BROKER}:{MQTT_PORT}]")
     client.subscribe(MQTT_TOPIC)
-    print(f"Listening for incoming ESP32-S3 pre-parsed beacon data stream on '{MQTT_TOPIC}'...")
+    print(f"Listening for incoming multi-gateway beacon data stream on '{MQTT_TOPIC}'...")
 
 def on_message(client, userdata, msg):
     try:
         payload = json.loads(msg.payload.decode('utf-8'))
+        
+        #  EXTRACT THE NEW SCANNER ID HERE
+        sc_id = payload.get('scanner_id', 'UNKNOWN_GATEWAY')
         
         mac_addr = payload.get('mac')
         rssi_val = payload.get('rssi')
@@ -26,14 +29,12 @@ def on_message(client, userdata, msg):
         major = payload.get('major')
         minor = payload.get('minor')
         esp_timestamp = payload.get('timestamp') 
-        
-        # 🔥 EXTRACT THE NEW BOOLEAN FLAG HERE
         beacon_flag = payload.get('flag', False) 
-
         raw_hex = payload.get('data', '')
 
-        # Save to database including the new flag field
+        # Save to database incorporating the new scanner identity field
         log_entry = BeaconLog.objects.create(
+            scanner_id=sc_id,  # <-- Map it here!
             mac=mac_addr,
             rssi=rssi_val,
             raw_data=raw_hex,
@@ -42,16 +43,17 @@ def on_message(client, userdata, msg):
             major=major,
             minor=minor,
             device_timestamp=esp_timestamp,
-            flag=beacon_flag  # <-- Map it to your database column here!
+            flag=beacon_flag
         )
 
-        # Output to terminal console showing the new flag status
+        # Output readable status tracking reports to terminal console
         print(f"[{log_entry.timestamp.strftime('%Y-%m-%d %H:%M:%S')}] Saved Beacon Entry:")
+        print(f"  🏢 Gateway Identity: {sc_id}")  # <-- Visually track it in console
         print(f"  🔹 ESP Hardware Time: {esp_timestamp}")
         print(f"  🔹 MAC Address   : {mac_addr}")
         print(f"  🔹 RSSI Signal   : {rssi_val} dBm")
         print(f"  🔹 Type          : {pkt_type}")
-        print(f"  🔹 Status Flag   : {beacon_flag}") # <-- Visually check it in console
+        print(f"  🔹 Status Flag   : {beacon_flag}")
         if is_ibeacon:
             print(f"  🔹 UUID Location : {uuid.upper() if uuid else 'N/A'}")
             print(f"  🔹 Major Zone ID : {major} | Minor Room ID: {minor}")
@@ -61,7 +63,7 @@ def on_message(client, userdata, msg):
         print(f"Inbound processing breakdown encountered: {e}")
 
 class Command(BaseCommand):
-    help = 'Starts the long-running daemon task absorbing pre-parsed MQTT stream packets into Django DB.'
+    help = 'Starts the long-running daemon task absorbing multi-scanner MQTT stream packets into Django DB.'
 
     def handle(self, *args, **options):
         client = mqtt.Client()
