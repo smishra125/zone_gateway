@@ -3,6 +3,7 @@ import json
 from datetime import datetime, timedelta
 from django.core.management.base import BaseCommand
 from django.db.models import Avg
+from django.utils import timezone  # 🌟 Added to handle timezone-aware queries
 import paho.mqtt.client as mqtt
 from smart_presence.models import BeaconLog
 
@@ -17,19 +18,13 @@ def calculate_assigned_location(mac_address, current_esp_time_str):
     and averages the RSSI per scanner. The scanner with the highest average wins.
     """
     try:
-        # Parse the ISO timestamp sent by the ESP32
-        # Example format: "2026-07-08T21:05:09"
-        target_time = datetime.strptime(current_esp_time_str.split('.')[0], "%Y-%m-%dT%H:%M:%S")
+        # For reliability across timezones, we query using Django's timezone-aware clock.
+        # This matches the database 'timestamp' field perfectly.
+        time_threshold = timezone.now() - timedelta(seconds=10)
         
-        # Look 5 seconds backward and 5 seconds forward around this packet's hardware timestamp
-        start_window = target_time - timedelta(seconds=5)
-        end_window = target_time + timedelta(seconds=5)
-        
-        # Convert to strings for simple CharField range matching or fallback to insertion time
-        # For reliability, we query using our Django database auto-timestamp window:
         logs_in_window = BeaconLog.objects.filter(
             mac=mac_address,
-            timestamp__gte=datetime.now() - timedelta(seconds=10) # 10-second rolling server history
+            timestamp__gte=time_threshold  # 🌟 Now comparing aware-datetime vs aware-datetime
         )
         
         if not logs_in_window.exists():
@@ -44,7 +39,6 @@ def calculate_assigned_location(mac_address, current_esp_time_str):
         
         if scanner_averages:
             winning_scanner = scanner_averages[0]['scanner_id']
-            winning_rssi = scanner_averages[0]['avg_rssi']
             return winning_scanner
             
     except Exception as calc_error:
@@ -97,7 +91,7 @@ def on_message(client, userdata, msg):
         log_entry.save(update_fields=['assigned_location'])
 
         # Output localization telemetry reports to the terminal console
-        print(f"[{log_entry.timestamp.strftime('%Y-%m-%d %H:%M:%S')}] Live Ingestion & Localization:")
+        print(f"[{timezone.localtime(log_entry.timestamp).strftime('%Y-%m-%d %H:%M:%S')}] Live Ingestion & Localization:")
         print(f"  🏢 Reporting Gateway : {sc_id} (Current RSSI: {rssi_val} dBm)")
         print(f"  🔹 ESP Hardware Time : {esp_timestamp}")
         print(f"  🔹 MAC Address       : {mac_addr}")
